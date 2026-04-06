@@ -180,7 +180,17 @@ async def execute_dax_query(workspace_id: str, dataset_id: str, dax_query: str) 
         resp = await client.post(url, headers=_headers(), json=body, timeout=60)
         if resp.status_code == 200:
             return resp.json()
-        # Fabric API fallback
+        if resp.status_code == 400:
+            # DAX syntax/semantic error -- return the error, don't fall through
+            return resp.json()
+        if resp.status_code == 401:
+            # RLS-enabled model or permission issue -- include helpful message
+            raise httpx.HTTPStatusError(
+                f"Unauthorized (401). If this model has RLS enabled, SP DAX queries are not supported.",
+                request=resp.request,
+                response=resp,
+            )
+        # Other errors -- try Fabric API fallback
         url = f"{BASE_URL}/workspaces/{workspace_id}/semanticModels/{dataset_id}/executeQueries"
         resp = await client.post(url, headers=_headers(), json=body, timeout=60)
         resp.raise_for_status()
