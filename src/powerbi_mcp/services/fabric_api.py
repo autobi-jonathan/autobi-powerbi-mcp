@@ -162,6 +162,9 @@ async def get_refresh_history(workspace_id: str, dataset_id: str, top: int = 5) 
 async def execute_dax_query(workspace_id: str, dataset_id: str, dax_query: str) -> dict[str, Any]:
     """Execute a DAX query against a semantic model.
 
+    Uses PBI API (supports SP auth) with Fabric API fallback.
+    Note: RLS-enabled models do not support SP DAX queries.
+
     Args:
         workspace_id: Fabric workspace GUID.
         dataset_id: Semantic model GUID.
@@ -170,9 +173,15 @@ async def execute_dax_query(workspace_id: str, dataset_id: str, dax_query: str) 
     Returns:
         Query result dict.
     """
-    url = f"{BASE_URL}/workspaces/{workspace_id}/semanticModels/{dataset_id}/executeQueries"
     body = {"queries": [{"query": dax_query}], "serializerSettings": {"includeNulls": True}}
     async with httpx.AsyncClient() as client:
+        # PBI API (works with SP auth for non-RLS models)
+        url = f"{PBI_URL}/groups/{workspace_id}/datasets/{dataset_id}/executeQueries"
+        resp = await client.post(url, headers=_headers(), json=body, timeout=60)
+        if resp.status_code == 200:
+            return resp.json()
+        # Fabric API fallback
+        url = f"{BASE_URL}/workspaces/{workspace_id}/semanticModels/{dataset_id}/executeQueries"
         resp = await client.post(url, headers=_headers(), json=body, timeout=60)
         resp.raise_for_status()
         return resp.json()
