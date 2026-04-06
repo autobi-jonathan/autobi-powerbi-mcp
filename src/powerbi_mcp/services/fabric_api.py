@@ -14,6 +14,8 @@ from powerbi_mcp.config.settings import Settings
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.fabric.microsoft.com/v1"
+PBI_ADMIN_URL = "https://api.powerbi.com/v1.0/myorg/admin"
+PBI_URL = "https://api.powerbi.com/v1.0/myorg"
 
 
 def _headers() -> dict[str, str]:
@@ -23,12 +25,22 @@ def _headers() -> dict[str, str]:
 
 
 async def get_workspaces() -> list[dict[str, Any]]:
-    """List all accessible Fabric workspaces.
+    """List all Fabric workspaces using admin API with user API fallback.
 
     Returns:
-        List of workspace dicts with id, displayName, type, state.
+        List of workspace dicts with id, displayName/name, type, state.
     """
     async with httpx.AsyncClient() as client:
+        # Try admin API first (tenant-level SP access)
+        resp = await client.get(f"{PBI_ADMIN_URL}/groups?$top=5000", headers=_headers(), timeout=30)
+        if resp.status_code == 200:
+            workspaces = resp.json().get("value", [])
+            # Normalize field names (admin API uses 'name', Fabric uses 'displayName')
+            for ws in workspaces:
+                if "name" in ws and "displayName" not in ws:
+                    ws["displayName"] = ws["name"]
+            return workspaces
+        # Fall back to Fabric user API
         resp = await client.get(f"{BASE_URL}/workspaces", headers=_headers(), timeout=30)
         resp.raise_for_status()
         return resp.json().get("value", [])
@@ -37,6 +49,8 @@ async def get_workspaces() -> list[dict[str, Any]]:
 async def get_workspace_items(workspace_id: str, item_type: str | None = None) -> list[dict[str, Any]]:
     """List items in a workspace, optionally filtered by type.
 
+    Uses Fabric API with Power BI admin API fallback for tenant-level SP access.
+
     Args:
         workspace_id: Fabric workspace GUID.
         item_type: Optional filter (SemanticModel, Report, DataPipeline, etc.).
@@ -44,12 +58,28 @@ async def get_workspace_items(workspace_id: str, item_type: str | None = None) -
     Returns:
         List of item dicts with id, displayName, type.
     """
-    url = f"{BASE_URL}/workspaces/{workspace_id}/items"
-    params = {"type": item_type} if item_type else {}
     async with httpx.AsyncClient() as client:
+        # Try Fabric API first
+        url = f"{BASE_URL}/workspaces/{workspace_id}/items"
+        params = {"type": item_type} if item_type else {}
         resp = await client.get(url, headers=_headers(), params=params, timeout=30)
-        resp.raise_for_status()
-        return resp.json().get("value", [])
+        if resp.status_code == 200:
+            return resp.json().get("value", [])
+        # Fall back to Power BI admin API (returns datasets, reports, etc. separately)
+        items: list[dict[str, Any]] = []
+        type_endpoints = {
+            "SemanticModel": "datasets",
+            "Report": "reports",
+            "Dashboard": "dashboards",
+            "Dataflow": "dataflows",
+        }
+        endpoints = {item_type: type_endpoints[item_type]} if item_type and item_type in type_endpoints else type_endpoints
+        for itype, endpoint in endpoints.items():
+            r = await client.get(f"{PBI_ADMIN_URL}/groups/{workspace_id}/{endpoint}", headers=_headers(), timeout=30)
+            if r.status_code == 200:
+                for item in r.json().get("value", []):
+                    items.append({"id": item.get("id", ""), "displayName": item.get("name", ""), "type": itype, **{k: v for k, v in item.items() if k not in ("id", "name")}})
+        return items
 
 
 async def get_item_definition(workspace_id: str, item_id: str) -> dict[str, Any]:
@@ -108,12 +138,25 @@ async def get_refresh_history(workspace_id: str, dataset_id: str, top: int = 5) 
     Returns:
         List of refresh history entries.
     """
-    url = f"{BASE_URL}/workspaces/{workspace_id}/semanticModels/{dataset_id}/refreshes"
-    params = {"$top": top}
     async with httpx.AsyncClient() as client:
-        resp = await client.get(url, headers=_headers(), params=params, timeout=30)
-        resp.raise_for_status()
-        return resp.json().get("value", [])
+        # User API (works if SP has workspace membership)
+        url = f"{PBI_URL}/groups/{workspace_id}/datasets/{dataset_id}/refreshes?$top={top}"
+        resp = await client.get(url, headers=_headers(), timeout=30)
+        if resp.status_code == 200:
+            return resp.json().get("value", [])
+        # Fabric API
+        url = f"{BASE_URL}/workspaces/{workspace_id}/semanticModels/{dataset_id}/refreshes"
+        resp = await client.get(url, headers=_headers(), params={"$top": top}, timeout=30)
+        if resp.status_code == 200:
+            return resp.json().get("value", [])
+        # Admin API doesn't expose per-dataset refresh history directly.
+        # Fall back to refresh schedule as partial info.
+        url = f"{PBI_ADMIN_URL}/datasets/{dataset_id}/refreshSchedule"
+        resp = await client.get(url, headers=_headers(), timeout=30)
+        if resp.status_code == 200:
+            schedule = resp.json()
+            return [{"status": "Scheduled", "refreshType": "Scheduled", "schedule": schedule}]
+        return []
 
 
 async def execute_dax_query(workspace_id: str, dataset_id: str, dax_query: str) -> dict[str, Any]:

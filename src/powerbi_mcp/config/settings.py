@@ -5,10 +5,13 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load .env from the project root (3 levels up from this file)
+_project_root = Path(__file__).resolve().parents[3]
+load_dotenv(_project_root / ".env")
 
 logger = logging.getLogger(__name__)
 
