@@ -21,9 +21,19 @@ python -m powerbi_mcp
 pytest
 ```
 
+## CLI Commands
+```bash
+python -m powerbi_mcp            # Start MCP server (default)
+python -m powerbi_mcp serve      # Start MCP server (explicit)
+python -m powerbi_mcp login      # Device code flow -- interactive user auth
+python -m powerbi_mcp logout     # Clear cached user tokens
+python -m powerbi_mcp status     # Show auth state (SP, user token, cache)
+```
+
 ## Key Architecture
 - `src/powerbi_mcp/server.py` -- MCP server entry point (FastMCP)
-- `src/powerbi_mcp/config/settings.py` -- Fabric API credentials from .env
+- `src/powerbi_mcp/config/settings.py` -- SP credentials from .env
+- `src/powerbi_mcp/config/auth.py` -- MSAL device code flow, token cache
 - `src/powerbi_mcp/services/fabric_api.py` -- Shared Fabric REST API client
 - `src/powerbi_mcp/tools/workspace.py` -- Workspace & model query tools
 - `src/powerbi_mcp/tools/validation.py` -- DAX & schema validation tools
@@ -45,9 +55,18 @@ pytest
 | `promote_stage` | Deployment | Promote through deployment pipeline |
 
 ## Authentication
-Two authentication methods supported:
-1. **Service Principal** (recommended): Set `FABRIC_TENANT_ID`, `FABRIC_CLIENT_ID`, `FABRIC_CLIENT_SECRET` in `.env`
-2. **Azure CLI**: Run `az login`, leave service principal vars blank
+
+Three methods, used in combination:
+
+| Method | Used For | Setup |
+|--------|----------|-------|
+| **Service Principal** | Admin operations (workspaces, items, refresh) | Set `FABRIC_TENANT_ID`, `FABRIC_CLIENT_ID`, `FABRIC_CLIENT_SECRET` in `.env` |
+| **User Token (MSAL)** | DAX queries (especially RLS models) | Run `python -m powerbi_mcp login` once. Cached 90 days. |
+| **Azure CLI** | Fallback if SP not configured | Run `az login` |
+
+DAX queries use the user token when available (required for RLS-enabled models), falling back to SP.
+Admin operations always use the SP token.
+Token cache: `~/.powerbi-mcp/token_cache.bin` (DPAPI encrypted on Windows).
 
 ## Integration with Other Projects
 Add to Claude Code settings as an MCP server:

@@ -19,9 +19,19 @@ PBI_URL = "https://api.powerbi.com/v1.0/myorg"
 
 
 def _headers() -> dict[str, str]:
-    """Build authorization headers with a fresh token."""
+    """Build authorization headers with SP token (for admin operations)."""
     token = Settings.get_access_token()
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+
+def _user_headers() -> dict[str, str]:
+    """Build headers with user token (for DAX on RLS models), SP fallback."""
+    from powerbi_mcp.config.auth import get_user_token
+
+    user_token = get_user_token()
+    if user_token:
+        return {"Authorization": f"Bearer {user_token}", "Content-Type": "application/json"}
+    return _headers()
 
 
 async def get_workspaces() -> list[dict[str, Any]]:
@@ -162,8 +172,7 @@ async def get_refresh_history(workspace_id: str, dataset_id: str, top: int = 5) 
 async def execute_dax_query(workspace_id: str, dataset_id: str, dax_query: str) -> dict[str, Any]:
     """Execute a DAX query against a semantic model.
 
-    Uses PBI API (supports SP auth) with Fabric API fallback.
-    Note: RLS-enabled models do not support SP DAX queries.
+    Uses user token (for RLS models) with SP fallback via _user_headers().
 
     Args:
         workspace_id: Fabric workspace GUID.
@@ -174,10 +183,11 @@ async def execute_dax_query(workspace_id: str, dataset_id: str, dax_query: str) 
         Query result dict.
     """
     body = {"queries": [{"query": dax_query}], "serializerSettings": {"includeNulls": True}}
+    headers = _user_headers()
     async with httpx.AsyncClient() as client:
-        # PBI API (works with SP auth for non-RLS models)
+        # PBI API (user token for RLS models, SP fallback)
         url = f"{PBI_URL}/groups/{workspace_id}/datasets/{dataset_id}/executeQueries"
-        resp = await client.post(url, headers=_headers(), json=body, timeout=60)
+        resp = await client.post(url, headers=headers, json=body, timeout=60)
         if resp.status_code == 200:
             return resp.json()
         if resp.status_code == 400:
@@ -192,7 +202,7 @@ async def execute_dax_query(workspace_id: str, dataset_id: str, dax_query: str) 
             )
         # Other errors -- try Fabric API fallback
         url = f"{BASE_URL}/workspaces/{workspace_id}/semanticModels/{dataset_id}/executeQueries"
-        resp = await client.post(url, headers=_headers(), json=body, timeout=60)
+        resp = await client.post(url, headers=headers, json=body, timeout=60)
         resp.raise_for_status()
         return resp.json()
 
